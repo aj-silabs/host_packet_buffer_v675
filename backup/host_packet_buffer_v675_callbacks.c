@@ -1,0 +1,416 @@
+/***************************************************************************//**
+ * @file
+ * @brief
+ *******************************************************************************
+ * # License
+ * <b>Copyright 2018 Silicon Laboratories Inc. www.silabs.com</b>
+ *******************************************************************************
+ *
+ * The licensor of this software is Silicon Laboratories Inc. Your use of this
+ * software is governed by the terms of Silicon Labs Master Software License
+ * Agreement (MSLA) available at
+ * www.silabs.com/about-us/legal/master-software-license-agreement. This
+ * software is distributed to you in Source Code format and is governed by the
+ * sections of the MSLA applicable to Source Code.
+ *
+ ******************************************************************************/
+
+// This callback file is created for your convenience. You may add application
+// code to this file. If you regenerate this file over a previous version, the
+// previous version will be overwritten and any code you have added will be
+// lost.
+
+#include "app/framework/include/af.h"
+
+#include "app/ncp/sample-app/xncp-led/led-protocol.h"
+
+#include "app/framework/plugin/device-table/device-table.h"
+
+#include "../../../../../SiliconLabs/SimplicityStudio/v4_2/developer/sdks/gecko_sdk_suite/v2.7/protocol/zigbee/app/util/serial/command-interpreter2.h"
+
+#include <stdlib.h>
+
+typedef struct {
+  // Finite-state machine's current state.
+  uint8_t state;
+
+  // The command line is stored in this buffer.
+  // Spaces and trailing '"' and '}' characters are removed,
+  // and hex strings are converted to bytes.
+  uint8_t buffer[EMBER_COMMAND_BUFFER_LENGTH];
+
+  // Indices of the tokens (command(s) and arguments) in the above buffer.
+  // The (+ 1) lets us store the ending index.
+  uint8_t tokenIndices[MAX_TOKEN_COUNT + 1];
+
+  // The number of tokens read in, including the command(s).
+  uint8_t tokenCount;
+
+  // Used while reading in the command line.
+  uint8_t index;
+
+  // First error found in this command.
+  uint8_t error;
+
+  // Storage for reading in a hex string. A value of 0xFF means unused.
+  uint8_t hexHighNibble;
+
+  // The token number of the first true argument after possible nested commands.
+  uint8_t argOffset;
+} EmberCommandState;
+
+EmberCommandState commandState;
+
+typedef void (*PF)(void);
+
+extern EmberCommandState get_commandState();
+
+extern void * get_command_action();
+
+extern void emberCommandReaderInit();
+
+extern uint8_t get_commandState_buffer_index();
+
+extern EmberCommandState set_commandState_buffer_index(uint8_t len);
+
+extern EmberCommandState set_state_token_count(uint8_t val);
+
+extern EmberCommandState set_commandState_buffer(uint8_t index,uint8_t *str,uint8_t len);
+
+extern EmberCommandState set_commandState_buffer_num(uint8_t index,uint8_t num);
+
+void set_commanderState_token_indice(uint8_t indices,uint8_t index);
+
+extern void emberCommandClearBuffer();
+
+extern void * get_reverse();
+
+/* This sample application demostrates an NCP using a custom protocol to
+ * communicate with the host. As an example protocol, the NCP has defined
+ * commands so that the host can control an LED on the NCP's RCM.  See
+ * led-protocol.h for details.
+ *
+ * The host sends custom EZSP commands to the NCP, and the NCP acts on them
+ * based on the functionality in the code found below.
+ * This sample application is meant to be paired with the xncp-led
+ * sample application in the NCP Application Framework.
+ */
+static void sendLedProtocolCommand(uint8_t command, uint32_t possibleParam)
+{
+  EmberStatus status;
+  uint8_t commandLength = 0;
+  uint8_t commandPayload[LED_PROTOCOL_MAX_FRAME_LENGTH];
+  uint8_t replyLength = LED_PROTOCOL_MAX_FRAME_LENGTH;
+  uint8_t replyPayload[LED_PROTOCOL_MAX_FRAME_LENGTH];
+
+  // Set the command byte.
+  commandPayload[LED_PROTOCOL_COMMAND_INDEX] = command;
+  commandLength++;
+
+  // Conditionally set the parameter.
+  if (command == LED_PROTOCOL_COMMAND_SET_FREQ) {
+    emberAfCopyInt32u(commandPayload, 1, possibleParam);
+    commandLength += sizeof(possibleParam);
+  }
+
+  // Send the command to the NCP.
+  status = ezspCustomFrame(commandLength,
+                           commandPayload,
+                           &replyLength,
+                           replyPayload);
+  emberAfCorePrintln("Send custom frame: 0x%X", status);
+
+  // If we were expecting a response, display it.
+  if (command == LED_PROTOCOL_COMMAND_GET_FREQ) {
+    emberAfCorePrintln(" Response (frequency): %u",
+                       emberAfGetInt32u(replyPayload,
+                                        LED_PROTOCOL_RESPONSE_INDEX,
+                                        replyLength));
+  } else if (command == LED_PROTOCOL_COMMAND_GET_LED) {
+    uint8_t ledState = replyPayload[LED_PROTOCOL_RESPONSE_INDEX];
+    emberAfCorePrintln("  Response (state): %u (%p)",
+                       ledState,
+                       ledStateNames[ledState]);
+  }
+}
+
+static void getFrequencyCommand(void)
+{
+  sendLedProtocolCommand(LED_PROTOCOL_COMMAND_GET_FREQ, 0); // no param
+}
+
+static void setFrequencyCommand(void)
+{
+  uint32_t frequency = (uint32_t)emberUnsignedCommandArgument(0);
+  sendLedProtocolCommand(LED_PROTOCOL_COMMAND_SET_FREQ, frequency);
+}
+
+static void getLedCommand(void)
+{
+  sendLedProtocolCommand(LED_PROTOCOL_COMMAND_GET_LED, 0); // no param
+}
+
+static void setLedCommand(void)
+{
+  uint8_t command = (uint8_t)emberUnsignedCommandArgument(0);
+  if (command > LED_PROTOCOL_COMMAND_STROBE_LED) {
+    emberAfCorePrintln("Invalid LED command: 0x%X", command);
+  } else {
+    sendLedProtocolCommand(command, 0); // no param
+  }
+}
+uint16_t generateUint16(void)
+{
+    uint16_t seed;
+    ezspGetRandomNumber(&seed);
+    return seed;
+}
+  
+uint16_t * generateInstallcode(void)
+{
+    uint16_t *ptr;
+    uint16_t install_code[8];
+
+    ptr = install_code;
+
+    while(ptr != &install_code[8]){
+        *ptr++ = generateUint16();
+    }
+
+    ptr = install_code;
+    while(ptr!=&install_code[8]){
+        emberAfCorePrint("install-code:%x",*ptr++);
+        emberAfCorePrintln("");
+    }
+
+    ptr = &install_code[0];
+    return ptr;
+}
+
+void generate_install_code_for_device(void)
+{
+    uint16_t i;
+    EmberAfPluginDeviceTableEntry *ptr; 
+    EmberAfPluginDeviceTableEntry *deviceTable = emberAfDeviceTablePointer();
+
+    ptr = deviceTable;
+
+    const char *path = "install_code.csv";
+    FILE *handler = fopen(path,"wt");
+
+    if(handler == NULL)
+        printf("emtpy file");
+
+
+    while(ptr!=&deviceTable[EMBER_AF_PLUGIN_DEVICE_TABLE_DEVICE_TABLE_SIZE])
+//    while(i++ < EMBER_AF_PLUGIN_DEVICE_TABLE_DEVICE_TABLE_SIZE) 
+    {
+        uint16_t *install_code_ptr;
+        install_code_ptr = generateInstallcode();
+
+
+        if((ptr->eui64[0] == 0xff) && (ptr->eui64[1] == 0xff)) break; 
+
+        fprintf(handler,"%02x%02x%02x%02x%02x%02x%02x%02x %04x%04x%04x%04x%04x%04x%04x%04x\n",
+                        ptr->eui64[7],ptr->eui64[6],ptr->eui64[5],ptr->eui64[4],
+                        ptr->eui64[3],ptr->eui64[2],ptr->eui64[1],ptr->eui64[0],
+                        install_code_ptr[0],install_code_ptr[1],install_code_ptr[2],install_code_ptr[3],
+                        install_code_ptr[4],install_code_ptr[5],install_code_ptr[6],install_code_ptr[7]);
+        ptr++;
+    }
+    fclose(handler);
+}
+
+
+void install_code_install()
+{
+    EmberCommandState commandState = get_commandState(); 
+
+/*
+    printf("tokenIndices[0] tokenIndices[1] tokenIndices[2] commandState.index:%d %d %d %d\n",commandState.tokenIndices[0],commandState.tokenIndices[1],commandState.tokenIndices[2],commandState.index);
+    printf("index:%d\n",commandState.index);
+    printf("buffer:%s\n",commandState.buffer);
+    printf("token count:%d\n",commandState.tokenCount);
+*/
+    uint8_t buf[40];
+    uint8_t *ptr = buf;
+
+    FILE *handler = fopen("install_code.csv","r"); 
+
+    if(handler == NULL)
+        printf("install_code.csv doesn't exist");
+
+
+    if(handler){
+        ptr = buf;
+        memset(ptr,0xff,40);
+        while (fscanf(handler,"%02x%02x%02x%02x%02x%02x%02x%02x \ 
+                        %04x%04x%04x%04x%04x%04x%04x%04x\n",&ptr[0],&ptr[1],&ptr[2],&ptr[3],
+                                                                  &ptr[4],&ptr[5],&ptr[6],&ptr[7],
+                                                                  &ptr[8],&ptr[10],&ptr[12],&ptr[14],
+                                                                  &ptr[16],&ptr[18],&ptr[20],&ptr[22])!= EOF){
+
+            ptr = buf;
+            while(ptr != &buf[24]){
+                printf("%02x ",*ptr);
+                ptr++;
+            }
+            printf("\n");
+            ptr = buf;
+            
+            uint8_t i;
+            uint16_t crc=0xffff;
+            uint8_t install_code[20];
+            uint8_t eui[10];
+            memcpy(&install_code[1],&ptr[8],16);
+            memcpy(&eui[1],ptr,8);
+
+            eui[0] = '{';
+            eui[9] = '}';
+
+            install_code[0] = '{';
+            install_code[19] = '}';
+
+
+
+            typedef uint8_t (*PDF)(uint8_t);
+            PDF pf;
+            pf = get_reverse();
+
+            for(i=1;i<17;i++){
+                crc = halCommonCrc16((*pf)(install_code[i]), crc);
+                printf("install_code %d %2x\n",install_code[i],crc);
+            }
+            crc = ~HIGH_LOW_TO_INT(pf(LOW_BYTE(crc)), pf(HIGH_BYTE(crc)));
+
+            memcpy(&install_code[17],&crc,2);
+            //install_code[17] = (uint8_t )((crc&0xff00)>>16);
+            //install_code[18] = (uint8_t)(crc&0x00ff);
+
+            emberCommandReaderInit();
+
+            uint8_t index = get_commandState_buffer_index();
+            set_commandState_buffer(index,"option",6);
+            set_commanderState_token_indice(0,index);
+            printf("token_indice[0]:%d\n",index);
+
+            set_commandState_buffer_index(6);
+    
+            index = get_commandState_buffer_index();
+
+            set_commandState_buffer(index,"install-code",12);
+            set_commanderState_token_indice(1,index);
+            printf("token_indice[1]:%d\n",index);
+
+            set_commandState_buffer_index(12);
+
+            index = get_commandState_buffer_index();
+            set_commandState_buffer_num(index,0x30);
+            set_commanderState_token_indice(2,index);
+
+            printf("token_indice[2]:%d\n",index);
+            set_commandState_buffer_index(1);
+
+            index = get_commandState_buffer_index();
+            set_commandState_buffer(index,eui,10);
+            set_commanderState_token_indice(3,index);
+            printf("token_indice[3]:%d\n",index);
+            set_commandState_buffer_index(10);
+
+            index = get_commandState_buffer_index();
+            set_commandState_buffer(index,install_code,20);
+            set_commanderState_token_indice(4,index);
+
+            printf("token_indice[4]:%d\n",index);
+
+            set_commandState_buffer_index(20);
+
+            set_state_token_count(5);
+
+            printf("----------------------------------------------------------\n");
+
+            printf("tokenIndices[0] tokenIndices[1] tokenIndices[2] tokenIndices[3]:%d %d %d %d\n",
+                    get_commandState().tokenIndices[0],
+                    get_commandState().tokenIndices[1],
+                    get_commandState().tokenIndices[2],
+                    get_commandState().tokenIndices[3]);
+            printf("buffer:%s\n",get_commandState().buffer);
+            printf("-----------------------------------------------------------\n");
+
+            PF pdf = get_command_action();
+            pdf();
+
+
+        }
+    }
+/*
+    emberCommandReaderInit();
+
+    uint8_t index = get_commandState_buffer_index();
+    set_commandState_buffer(index,"option");
+    set_commanderState_token_indice(0,index);
+
+    set_commandState_buffer_index(6);
+    
+    index = get_commandState_buffer_index();
+
+    set_commandState_buffer(index,"install-code");
+    set_commanderState_token_indice(1,index);
+    set_commandState_buffer_index(12);
+
+
+    set_state_token_count(2);
+
+
+    printf("start commander\n");
+    PF pf = get_command_action();
+    pf();
+*/
+}
+static void getInfoCommand(void)
+{
+  uint16_t version, manufacturerId;
+  EmberStatus status;
+
+  status = ezspGetXncpInfo(&manufacturerId, &version);
+
+  emberAfCorePrintln("Get XNCP info: status: 0x%X", status);
+  emberAfCorePrintln("  manufacturerId: 0x%X, version: 0x%X",
+                     manufacturerId, version);
+}
+
+EmberCommandEntry emberAfCustomCommands[] = {
+  emberCommandEntryAction("get-led",
+                          getLedCommand,
+                          "",
+                          "Get the state of an LED on the NCP."),
+  emberCommandEntryAction("set-led",
+                          setLedCommand,
+                          "u",
+                          "Set the state of an LED on the NCP using a custom LED protocol command."),
+  emberCommandEntryAction("get-frequency",
+                          getFrequencyCommand,
+                          "",
+                          "Get the current frequency of the LED strobe on the NCP."),
+  emberCommandEntryAction("set-frequency",
+                          setFrequencyCommand,
+                          "w",
+                          "Set the frequency of the LED strobe on the NCP."),
+
+  emberCommandEntryAction("install-code-generate",
+                          generate_install_code_for_device,
+                          "",
+                          "generate random install code"),
+
+  emberCommandEntryAction("install-code-install",
+                          install_code_install,
+                          "",
+                          "put install code into translient link key table"),
+
+  emberCommandEntryAction("get-info",
+                          getInfoCommand,
+                          "",
+                          "Display the XNCP information on the CLI."),
+
+  emberCommandEntryTerminator()
+};

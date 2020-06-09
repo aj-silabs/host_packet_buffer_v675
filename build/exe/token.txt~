@@ -1,0 +1,11 @@
+#
+# The token data can be in one of three main forms: byte-array, integer, or string.
+# Byte-arrays are a series of hexadecimal numbers of the required length.
+# Integers are BIG endian hexadecimal numbers.
+# String data is a quoted set of ASCII characters.
+#
+
+#'MFG_INSTALLATION_CODE (Smart Energy Install Code)' token group
+# Install Code Flags : 0x0006
+Install Code       : 1111222233334444AAAABBBBCCCCDDDD
+# CRC                : 0x203D
